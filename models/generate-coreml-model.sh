@@ -23,9 +23,10 @@ if [ "$mname" = "-h5" ]; then
   mname="$2"
   mpath="$3"
   echo "$mpath"
-  python3 models/convert-h5-to-coreml.py --model-name "$mname" --model-path "$mpath" --encoder-only True
+  # always use python in conda environments
+  python models/convert-h5-to-coreml.py --model-name "$mname" --model-path "$mpath" --encoder-only True
 else
-  python3 models/convert-whisper-to-coreml.py --model "$mname" --encoder-only True --optimize-ane True
+  python models/convert-whisper-to-coreml.py --model "$mname" --encoder-only True
 fi
 
 xcrun coremlc compile models/coreml-encoder-"${mname}".mlpackage models/

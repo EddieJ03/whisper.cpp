@@ -27,6 +27,7 @@ struct whisper_params {
 
     float vad_thold    = 0.6f;
     float freq_thold   = 100.0f;
+    float SILENCE_THRESHOLD = 0.001f;
 
     bool translate     = false;
     bool no_fallback   = false;
@@ -37,6 +38,7 @@ struct whisper_params {
     bool save_audio    = false; // save audio to wav file
     bool use_gpu       = true;
     bool flash_attn    = true;
+    bool subprocess_mode     = false;
 
     std::string language  = "en";
     std::string model     = "models/ggml-base.en.bin";
@@ -75,6 +77,7 @@ static bool whisper_params_parse(int argc, char ** argv, whisper_params & params
         else if (arg == "-ng"   || arg == "--no-gpu")        { params.use_gpu       = false; }
         else if (arg == "-fa"   || arg == "--flash-attn")    { params.flash_attn    = true; }
         else if (arg == "-nfa"  || arg == "--no-flash-attn") { params.flash_attn    = false; }
+        else if (arg == "--subprocess-mode")                        { params.subprocess_mode    = true; } 
 
         else {
             fprintf(stderr, "error: unknown argument: %s\n", arg.c_str());
@@ -230,7 +233,7 @@ int main(int argc, char ** argv) {
 
         wavWriter.open(filename, WHISPER_SAMPLE_RATE, 16, 1);
     }
-    printf("[Start speaking]\n");
+    printf("Begin transcription...\n");
     fflush(stdout);
 
     auto t_last  = std::chrono::high_resolution_clock::now();
@@ -289,6 +292,17 @@ int main(int argc, char ** argv) {
             memcpy(pcmf32.data() + n_samples_take, pcmf32_new.data(), n_samples_new*sizeof(float));
 
             pcmf32_old = pcmf32;
+
+            float energy = 0.0f;
+            for (const auto& sample : pcmf32) {
+                energy += fabsf(sample);
+            }
+            energy /= pcmf32.size();
+
+            // Skip transcription if energy is too low (silence)
+            if (energy < params.SILENCE_THRESHOLD) {
+                continue;
+            }
         } else {
             const auto t_now  = std::chrono::high_resolution_clock::now();
             const auto t_diff = std::chrono::duration_cast<std::chrono::milliseconds>(t_now - t_last).count();
@@ -346,12 +360,11 @@ int main(int argc, char ** argv) {
             // print result;
             {
                 if (!use_vad) {
-                    printf("\33[2K\r");
+                    if (!params.subprocess_mode) {
+                        printf("\33[2K\r");
 
-                    // print long empty line to clear the previous line
-                    printf("%s", std::string(100, ' ').c_str());
-
-                    printf("\33[2K\r");
+                        printf("\33[2K\r");
+                    }
                 } else {
                     const int64_t t1 = (t_last - t_start).count()/1000000;
                     const int64_t t0 = std::max(0.0, t1 - pcmf32.size()*1000.0/WHISPER_SAMPLE_RATE);
@@ -362,16 +375,12 @@ int main(int argc, char ** argv) {
                 }
 
                 const int n_segments = whisper_full_n_segments(ctx);
+                std::string output;
                 for (int i = 0; i < n_segments; ++i) {
                     const char * text = whisper_full_get_segment_text(ctx, i);
 
                     if (params.no_timestamps) {
-                        printf("%s", text);
-                        fflush(stdout);
-
-                        if (params.fname_out.length() > 0) {
-                            fout << text;
-                        }
+                        output += text;
                     } else {
                         const int64_t t0 = whisper_full_get_segment_t0(ctx, i);
                         const int64_t t1 = whisper_full_get_segment_t1(ctx, i);
@@ -394,19 +403,30 @@ int main(int argc, char ** argv) {
                 }
 
                 if (params.fname_out.length() > 0) {
+                    if (output.length() > 0)
+                        fout << output;
                     fout << std::endl;
                 }
 
                 if (use_vad) {
                     printf("\n");
                     printf("### Transcription %d END\n", n_iter);
+                } else {
+                    if (params.subprocess_mode)
+                        printf("U:%s\n", output.c_str());
+                    else
+                        printf("%s", output.c_str());
+                    fflush(stdout);
                 }
             }
 
             ++n_iter;
 
             if (!use_vad && (n_iter % n_new_line) == 0) {
-                printf("\n");
+                if (params.subprocess_mode)
+                    printf("C:\n");
+                else
+                    printf("\n");
 
                 // keep part of the audio for next iteration to try to mitigate word boundary issues
                 pcmf32_old = std::vector<float>(pcmf32.end() - n_samples_keep, pcmf32.end());
