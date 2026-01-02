@@ -26,6 +26,104 @@
 #define MINIAUDIO_IMPLEMENTATION
 #include "miniaudio.h"
 
+// RNNoise works at 48kHz with 480-sample frames (10ms)
+// Whisper uses 16kHz, so we need to resample
+static const int RNNOISE_SAMPLE_RATE = 48000;
+static const int RNNOISE_FRAME_SIZE = 480;  // Must match rnnoise_get_frame_size()
+
+// Pre-initialized resamplers for efficient reuse
+static ma_linear_resampler g_resampler_16k_to_48k;
+static ma_linear_resampler g_resampler_48k_to_16k;
+static bool g_resamplers_initialized = false;
+
+bool init_resamplers() {
+    if (g_resamplers_initialized) return true;
+
+    // 16kHz -> 48kHz resampler (upsampling for RNNoise input)
+    ma_linear_resampler_config config_up = ma_linear_resampler_config_init(
+        ma_format_f32,
+        1,  // mono
+        WHISPER_SAMPLE_RATE,
+        RNNOISE_SAMPLE_RATE);
+    config_up.lpfOrder = 4;
+
+    if (ma_linear_resampler_init(&config_up, NULL, &g_resampler_16k_to_48k) != MA_SUCCESS) {
+        return false;
+    }
+
+    // 48kHz -> 16kHz resampler (downsampling for Whisper input)
+    ma_linear_resampler_config config_down = ma_linear_resampler_config_init(
+        ma_format_f32,
+        1,  // mono
+        RNNOISE_SAMPLE_RATE,
+        WHISPER_SAMPLE_RATE);
+    config_down.lpfOrder = 4;  // Important for anti-aliasing during downsampling
+
+    if (ma_linear_resampler_init(&config_down, NULL, &g_resampler_48k_to_16k) != MA_SUCCESS) {
+        ma_linear_resampler_uninit(&g_resampler_16k_to_48k, NULL);
+        return false;
+    }
+
+    g_resamplers_initialized = true;
+    return true;
+}
+
+void uninit_resamplers() {
+    if (!g_resamplers_initialized) return;
+
+    ma_linear_resampler_uninit(&g_resampler_16k_to_48k, NULL);
+    ma_linear_resampler_uninit(&g_resampler_48k_to_16k, NULL);
+    g_resamplers_initialized = false;
+}
+
+// Resample audio using a pre-initialized resampler (internal helper)
+static std::vector<float> resample_audio(ma_linear_resampler& resampler, const std::vector<float>& input) {
+    if (input.empty() || !g_resamplers_initialized) return input;
+
+    // Reset first so get_expected_output_frame_count uses consistent state
+    ma_linear_resampler_reset(&resampler);
+
+    ma_uint64 input_frames = input.size();
+    ma_uint64 output_frames;
+    ma_linear_resampler_get_expected_output_frame_count(&resampler, input_frames, &output_frames);
+
+    std::vector<float> output(output_frames);
+
+    ma_linear_resampler_process_pcm_frames(&resampler, input.data(), &input_frames,
+                                            output.data(), &output_frames);
+
+    output.resize(output_frames);
+    return output;
+}
+
+void denoise_audio(DenoiseState* st, std::vector<float>& pcmf32) {
+    if (pcmf32.empty()) return;
+
+    // Resample 16kHz -> 48kHz
+    std::vector<float> pcmf32_48k = resample_audio(g_resampler_16k_to_48k, pcmf32);
+
+    // Process in 480-sample frames
+    std::vector<float> frame(RNNOISE_FRAME_SIZE);
+
+    for (size_t i = 0; i + RNNOISE_FRAME_SIZE <= pcmf32_48k.size(); i += RNNOISE_FRAME_SIZE) {
+        // RNNoise expects samples in range [-32768, 32768]
+        for (int j = 0; j < RNNOISE_FRAME_SIZE; j++) {
+            frame[j] = pcmf32_48k[i + j] * 32768.0f; // because pcmf32_48k is in range [-1, 1] due to AUDIO_F32
+        }
+
+        // Apply denoising
+        rnnoise_process_frame(st, frame.data(), frame.data());
+
+        // Copy back (normalize)
+        for (int j = 0; j < RNNOISE_FRAME_SIZE; j++) {
+            pcmf32_48k[i + j] = frame[j] / 32768.0f;
+        }
+    }
+
+    // Resample 48kHz -> 16kHz
+    pcmf32 = resample_audio(g_resampler_48k_to_16k, pcmf32_48k);
+}
+
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>

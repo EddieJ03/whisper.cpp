@@ -13,6 +13,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <cmath>
 
 // command-line parameters
 struct whisper_params {
@@ -28,6 +29,10 @@ struct whisper_params {
     float vad_thold    = 0.6f;
     float freq_thold   = 100.0f;
     float SILENCE_THRESHOLD = 0.001f;
+
+    std::string silero_vad_model = "";  // path to Silero VAD model (empty = disabled)
+    float silero_vad_threshold = 0.2f;  // VAD probability threshold
+    bool use_rnnoise   = false;
 
     bool translate     = false;
     bool no_fallback   = false;
@@ -65,6 +70,8 @@ static bool whisper_params_parse(int argc, char ** argv, whisper_params & params
         else if (arg == "-bs"   || arg == "--beam-size")     { params.beam_size     = std::stoi(argv[++i]); }
         else if (arg == "-vth"  || arg == "--vad-thold")     { params.vad_thold     = std::stof(argv[++i]); }
         else if (arg == "-fth"  || arg == "--freq-thold")    { params.freq_thold    = std::stof(argv[++i]); }
+        else if (arg == "-svm"  || arg == "--silero-vad-model") { params.silero_vad_model = argv[++i]; }
+        else if (arg == "-svt"  || arg == "--silero-vad-threshold") { params.silero_vad_threshold = std::stof(argv[++i]); }
         else if (arg == "-tr"   || arg == "--translate")     { params.translate     = true; }
         else if (arg == "-nf"   || arg == "--no-fallback")   { params.no_fallback   = true; }
         else if (arg == "-ps"   || arg == "--print-special") { params.print_special = true; }
@@ -77,7 +84,8 @@ static bool whisper_params_parse(int argc, char ** argv, whisper_params & params
         else if (arg == "-ng"   || arg == "--no-gpu")        { params.use_gpu       = false; }
         else if (arg == "-fa"   || arg == "--flash-attn")    { params.flash_attn    = true; }
         else if (arg == "-nfa"  || arg == "--no-flash-attn") { params.flash_attn    = false; }
-        else if (arg == "--subprocess-mode")                        { params.subprocess_mode    = true; } 
+        else if (arg == "--subprocess-mode")                 { params.subprocess_mode    = true; } 
+        else if (arg == "--denoise")                         { params.use_rnnoise   = true; }
 
         else {
             fprintf(stderr, "error: unknown argument: %s\n", arg.c_str());
@@ -105,6 +113,8 @@ void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params & para
     fprintf(stderr, "  -bs N,    --beam-size N   [%-7d] beam size for beam search\n",                      params.beam_size);
     fprintf(stderr, "  -vth N,   --vad-thold N   [%-7.2f] voice activity detection threshold\n",           params.vad_thold);
     fprintf(stderr, "  -fth N,   --freq-thold N  [%-7.2f] high-pass frequency cutoff\n",                   params.freq_thold);
+    fprintf(stderr, "  -svm FNAME, --silero-vad-model FNAME [%-7s] Silero VAD model path (empty = disabled)\n", params.silero_vad_model.c_str());
+    fprintf(stderr, "  -svt N,   --silero-vad-threshold N [%-7.2f] Silero VAD probability threshold\n",    params.silero_vad_threshold);
     fprintf(stderr, "  -tr,      --translate     [%-7s] translate from source language to english\n",      params.translate ? "true" : "false");
     fprintf(stderr, "  -nf,      --no-fallback   [%-7s] do not use temperature fallback while decoding\n", params.no_fallback ? "true" : "false");
     fprintf(stderr, "  -ps,      --print-special [%-7s] print special tokens\n",                           params.print_special ? "true" : "false");
@@ -117,8 +127,11 @@ void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params & para
     fprintf(stderr, "  -ng,      --no-gpu        [%-7s] disable GPU inference\n",                          params.use_gpu ? "false" : "true");
     fprintf(stderr, "  -fa,      --flash-attn    [%-7s] enable flash attention during inference\n",        params.flash_attn ? "true" : "false");
     fprintf(stderr, "  -nfa,     --no-flash-attn [%-7s] disable flash attention during inference\n",       params.flash_attn ? "false" : "true");
+    fprintf(stderr, "            --rnnoise       [%-7s] enable RNNoise noise reduction before VAD\n",      params.use_rnnoise ? "true" : "false");
     fprintf(stderr, "\n");
 }
+
+static void cb_log_disable(enum ggml_log_level, const char *, void *) { }
 
 int main(int argc, char ** argv) {
     ggml_backend_load_all();
@@ -128,6 +141,8 @@ int main(int argc, char ** argv) {
     if (whisper_params_parse(argc, argv, params) == false) {
         return 1;
     }
+
+    whisper_log_set(cb_log_disable, NULL); // ignore print statements from VAD check
 
     params.keep_ms   = std::min(params.keep_ms,   params.step_ms);
     params.length_ms = std::max(params.length_ms, params.step_ms);
@@ -171,6 +186,34 @@ int main(int argc, char ** argv) {
     if (ctx == nullptr) {
         fprintf(stderr, "error: failed to initialize whisper context\n");
         return 2;
+    }
+
+    struct whisper_vad_context * vad_ctx = nullptr;
+    if (!params.silero_vad_model.empty()) {
+        struct whisper_vad_context_params vad_cparams = whisper_vad_default_context_params();
+        vad_cparams.n_threads = params.n_threads;
+        vad_cparams.use_gpu = false;  // VAD GPU support is not fully implemented in whisper.cpp
+
+        vad_ctx = whisper_vad_init_from_file_with_params(params.silero_vad_model.c_str(), vad_cparams);
+        if (vad_ctx == nullptr) {
+            fprintf(stderr, "error: failed to initialize Silero VAD context\n");
+            return 3;
+        }
+    }
+
+    DenoiseState * rnnoise_st = nullptr;
+    if (params.use_rnnoise) {
+        rnnoise_st = rnnoise_create(NULL);
+        if (rnnoise_st == nullptr) {
+            fprintf(stderr, "error: failed to initialize RNNoise\n");
+            return 4;
+        }
+        if (!init_resamplers()) {
+            fprintf(stderr, "error: failed to initialize resamplers for RNNoise\n");
+            rnnoise_destroy(rnnoise_st);
+            return 5;
+        }
+        fprintf(stderr, "%s: RNNoise noise reduction enabled\n", __func__);
     }
 
     std::vector<float> pcmf32    (n_samples_30s, 0.0f);
@@ -326,6 +369,27 @@ int main(int argc, char ** argv) {
             t_last = t_now;
         }
 
+        if (vad_ctx != nullptr) {
+            std::vector<float> pcmf32_vad = pcmf32;
+
+            if (rnnoise_st != nullptr) {
+                denoise_audio(rnnoise_st, pcmf32_vad);
+            }
+
+            struct whisper_vad_params vad_params = whisper_vad_default_params();
+            vad_params.threshold = params.silero_vad_threshold;
+
+            struct whisper_vad_segments * segments = whisper_vad_segments_from_samples(
+                vad_ctx, vad_params, pcmf32_vad.data(), pcmf32_vad.size());
+
+            int n_segments = whisper_vad_segments_n_segments(segments);
+            whisper_vad_free_segments(segments);
+
+            if (n_segments == 0) {
+                continue;
+            }
+        }
+
         // run the inference
         {
             whisper_full_params wparams = whisper_full_default_params(params.beam_size > 1 ? WHISPER_SAMPLING_BEAM_SEARCH : WHISPER_SAMPLING_GREEDY);
@@ -452,6 +516,15 @@ int main(int argc, char ** argv) {
 
     whisper_print_timings(ctx);
     whisper_free(ctx);
+
+    if (vad_ctx != nullptr) {
+        whisper_vad_free(vad_ctx);
+    }
+
+    if (rnnoise_st != nullptr) {
+        uninit_resamplers();
+        rnnoise_destroy(rnnoise_st);
+    }
 
     return 0;
 }

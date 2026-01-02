@@ -46,6 +46,12 @@ if (WHISPER_FFMPEG)
     set(COMMON_SOURCES_FFMPEG ffmpeg-transcode.cpp)
 endif()
 
+# RNNoise for noise reduction
+find_library(RNNOISE_LIB rnnoise REQUIRED)
+find_path(RNNOISE_INCLUDE_DIR rnnoise.h REQUIRED)
+message(STATUS "RNNoise: ${RNNOISE_LIB}")
+list(APPEND COMMON_EXTRA_LIBS ${RNNOISE_LIB})
+
 
 add_library(${TARGET} STATIC
     common.h
@@ -61,6 +67,7 @@ add_library(${TARGET} STATIC
 
 include(DefaultTargetOptions)
 
+target_include_directories(${TARGET} PRIVATE ${RNNOISE_INCLUDE_DIR})
 target_link_libraries(${TARGET} PRIVATE whisper ${COMMON_EXTRA_LIBS} ${CMAKE_DL_LIBS})
 
 set_target_properties(${TARGET} PROPERTIES POSITION_INDEPENDENT_CODE ON)
