@@ -303,6 +303,9 @@ int main(int argc, char ** argv) {
 
     auto t_last  = std::chrono::high_resolution_clock::now();
     const auto t_start = t_last;
+    uint16_t skip = 0;
+    bool previous_text = false;
+    const uint8_t SKIP_CLEAR = 3;
 
     // main audio loop
     while (is_running) {
@@ -366,6 +369,14 @@ int main(int argc, char ** argv) {
 
             // Skip transcription if energy is too low (silence)
             if (energy < params.SILENCE_THRESHOLD) {
+                skip += 1;
+                if (params.subprocess_mode && skip > SKIP_CLEAR) {
+                    if (previous_text) {
+                        printf("U:\n");
+                        fflush(stdout);
+                    }
+                    previous_text = false;
+                }
                 continue;
             }
         } else {
@@ -408,6 +419,14 @@ int main(int argc, char ** argv) {
             whisper_vad_free_segments(segments);
 
             if (n_segments == 0) {
+                skip += 1;
+                if (params.subprocess_mode && skip > SKIP_CLEAR) {
+                    if (previous_text) {
+                        printf("U:\n");
+                        fflush(stdout);
+                    }
+                    previous_text = false;
+                }
                 continue;
             }
         }
@@ -501,6 +520,8 @@ int main(int argc, char ** argv) {
                     printf("\n");
                     printf("### Transcription %d END\n", n_iter);
                 } else {
+                    skip = 0;
+                    previous_text = true;
                     if (params.subprocess_mode)
                         printf("U:%s\n", output.c_str());
                     else
