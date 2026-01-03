@@ -31,7 +31,7 @@ struct whisper_params {
     float SILENCE_THRESHOLD = 0.001f;
 
     std::string silero_vad_model = "";  // path to Silero VAD model (empty = disabled)
-    float silero_vad_threshold = 0.2f;  // VAD probability threshold
+    float silero_vad_threshold = 0.7f;  // VAD probability threshold
     bool use_rnnoise   = false;
 
     bool translate     = false;
@@ -51,6 +51,28 @@ struct whisper_params {
 };
 
 void whisper_print_usage(int argc, char ** argv, const whisper_params & params);
+
+static std::string filter_sound_effects(const std::string& text) {
+    std::string result;
+    result.reserve(text.size());
+    bool in_asterisk = false;
+    for (char c : text) {
+        if (c == '*') {
+            in_asterisk = !in_asterisk;
+        } else if (!in_asterisk) {
+            result += c;
+        }
+    }
+
+    // Trim leading/trailing whitespace
+    size_t start = result.find_first_not_of(" \t\n\r");
+    size_t end = result.find_last_not_of(" \t\n\r");
+
+    if (start == std::string::npos) {
+        return "";  // String was all whitespace or empty
+    }
+    return result.substr(start, end - start + 1);
+}
 
 static bool whisper_params_parse(int argc, char ** argv, whisper_params & params) {
     for (int i = 1; i < argc; i++) {
@@ -442,14 +464,17 @@ int main(int argc, char ** argv) {
                 std::string output;
                 for (int i = 0; i < n_segments; ++i) {
                     const char * text = whisper_full_get_segment_text(ctx, i);
+                    std::string filtered_text = filter_sound_effects(text);
+                    if (filtered_text.empty())
+                        continue;
 
                     if (params.no_timestamps) {
-                        output += text;
+                        output += filtered_text;
                     } else {
                         const int64_t t0 = whisper_full_get_segment_t0(ctx, i);
                         const int64_t t1 = whisper_full_get_segment_t1(ctx, i);
 
-                        std::string output = "[" + to_timestamp(t0, false) + " --> " + to_timestamp(t1, false) + "]  " + text;
+                        std::string output = "[" + to_timestamp(t0, false) + " --> " + to_timestamp(t1, false) + "]  " + filtered_text;
 
                         if (whisper_full_get_segment_speaker_turn_next(ctx, i)) {
                             output += " [SPEAKER_TURN]";
