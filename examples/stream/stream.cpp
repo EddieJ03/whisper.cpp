@@ -298,7 +298,7 @@ int main(int argc, char ** argv) {
 
         wavWriter.open(filename, WHISPER_SAMPLE_RATE, 16, 1);
     }
-    printf("<Begin transcription>\n");
+    printf("<Ready to transcribe %s to %s>\n", params.language.c_str(), "en");
     fflush(stdout);
 
     auto t_last  = std::chrono::high_resolution_clock::now();
@@ -372,7 +372,7 @@ int main(int argc, char ** argv) {
                 skip += 1;
                 if (params.subprocess_mode && skip > SKIP_CLEAR) {
                     if (previous_text) {
-                        printf("U:\n");
+                        printf("<text>:\n");
                         fflush(stdout);
                     }
                     previous_text = false;
@@ -422,7 +422,7 @@ int main(int argc, char ** argv) {
                 skip += 1;
                 if (params.subprocess_mode && skip > SKIP_CLEAR) {
                     if (previous_text) {
-                        printf("U:\n");
+                        printf("<text>:\n");
                         fflush(stdout);
                     }
                     previous_text = false;
@@ -523,7 +523,7 @@ int main(int argc, char ** argv) {
                     skip = 0;
                     previous_text = true;
                     if (params.subprocess_mode)
-                        printf("U:%s\n", output.c_str());
+                        printf("<text>:%s\n", output.c_str());
                     else
                         printf("%s", output.c_str());
                     fflush(stdout);
