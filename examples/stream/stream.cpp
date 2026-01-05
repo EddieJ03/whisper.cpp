@@ -110,7 +110,7 @@ static bool whisper_params_parse(int argc, char ** argv, whisper_params & params
         else if (arg == "--denoise")                         { params.use_rnnoise   = true; }
 
         else {
-            fprintf(stderr, "error: unknown argument: %s\n", arg.c_str());
+            fprintf(stderr, "<error>: unknown argument: %s\n", arg.c_str());
             whisper_print_usage(argc, argv, params);
             exit(0);
         }
@@ -194,7 +194,7 @@ int main(int argc, char ** argv) {
 
     // whisper init
     if (params.language != "auto" && whisper_lang_id(params.language.c_str()) == -1){
-        fprintf(stderr, "error: unknown language '%s'\n", params.language.c_str());
+        fprintf(stderr, "<error>: unknown language '%s'\n", params.language.c_str());
         whisper_print_usage(argc, argv, params);
         exit(0);
     }
@@ -206,7 +206,7 @@ int main(int argc, char ** argv) {
 
     struct whisper_context * ctx = whisper_init_from_file_with_params(params.model.c_str(), cparams);
     if (ctx == nullptr) {
-        fprintf(stderr, "error: failed to initialize whisper context\n");
+        fprintf(stderr, "<error>: failed to initialize whisper context\n");
         return 2;
     }
 
@@ -218,7 +218,7 @@ int main(int argc, char ** argv) {
 
         vad_ctx = whisper_vad_init_from_file_with_params(params.silero_vad_model.c_str(), vad_cparams);
         if (vad_ctx == nullptr) {
-            fprintf(stderr, "error: failed to initialize Silero VAD context\n");
+            fprintf(stderr, "<error>: failed to initialize Silero VAD context\n");
             return 3;
         }
     }
@@ -227,11 +227,11 @@ int main(int argc, char ** argv) {
     if (params.use_rnnoise) {
         rnnoise_st = rnnoise_create(NULL);
         if (rnnoise_st == nullptr) {
-            fprintf(stderr, "error: failed to initialize RNNoise\n");
+            fprintf(stderr, "<error>: failed to initialize RNNoise\n");
             return 4;
         }
         if (!init_resamplers()) {
-            fprintf(stderr, "error: failed to initialize resamplers for RNNoise\n");
+            fprintf(stderr, "<error>: failed to initialize resamplers for RNNoise\n");
             rnnoise_destroy(rnnoise_st);
             return 5;
         }
@@ -298,7 +298,7 @@ int main(int argc, char ** argv) {
 
         wavWriter.open(filename, WHISPER_SAMPLE_RATE, 16, 1);
     }
-    printf("Begin transcription...\n");
+    printf("<Begin transcription>\n");
     fflush(stdout);
 
     auto t_last  = std::chrono::high_resolution_clock::now();
@@ -458,7 +458,7 @@ int main(int argc, char ** argv) {
             wparams.prompt_n_tokens  = params.no_context ? 0       : prompt_tokens.size();
 
             if (whisper_full(ctx, wparams, pcmf32.data(), pcmf32.size()) != 0) {
-                fprintf(stderr, "%s: failed to process audio\n", argv[0]);
+                fprintf(stderr, "<error> %s: failed to process audio\n", argv[0]);
                 return 6;
             }
 
