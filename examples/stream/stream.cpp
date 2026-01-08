@@ -28,7 +28,6 @@ struct whisper_params {
 
     float vad_thold    = 0.6f;
     float freq_thold   = 100.0f;
-    float SILENCE_THRESHOLD = 0.001f;
 
     std::string silero_vad_model = "";  // path to Silero VAD model (empty = disabled)
     float silero_vad_threshold = 0.7f;  // VAD probability threshold
@@ -305,7 +304,7 @@ int main(int argc, char ** argv) {
     const auto t_start = t_last;
     uint16_t skip = 0;
     bool previous_text = false;
-    const uint8_t SKIP_CLEAR = 3;
+    const uint8_t SKIP_CLEAR = 2;
 
     // main audio loop
     while (is_running) {
@@ -360,25 +359,6 @@ int main(int argc, char ** argv) {
             memcpy(pcmf32.data() + n_samples_take, pcmf32_new.data(), n_samples_new*sizeof(float));
 
             pcmf32_old = pcmf32;
-
-            float energy = 0.0f;
-            for (const auto& sample : pcmf32) {
-                energy += fabsf(sample);
-            }
-            energy /= pcmf32.size();
-
-            // Skip transcription if energy is too low (silence)
-            if (energy < params.SILENCE_THRESHOLD) {
-                skip += 1;
-                if (params.subprocess_mode && skip > SKIP_CLEAR) {
-                    if (previous_text) {
-                        printf("<text>:\n");
-                        fflush(stdout);
-                    }
-                    previous_text = false;
-                }
-                continue;
-            }
         } else {
             const auto t_now  = std::chrono::high_resolution_clock::now();
             const auto t_diff = std::chrono::duration_cast<std::chrono::milliseconds>(t_now - t_last).count();
