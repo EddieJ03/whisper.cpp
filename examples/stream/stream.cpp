@@ -73,6 +73,21 @@ static std::string filter_sound_effects(const std::string& text) {
     return result.substr(start, end - start + 1);
 }
 
+static bool found_speech_segments(
+    const whisper_params & params, 
+    const whisper_vad_params & vad_params,
+    whisper_vad_context *vad_ctx, 
+    std::vector<float> & pcmf32_vad
+) {
+    struct whisper_vad_segments * segments = whisper_vad_segments_from_samples(
+        vad_ctx, vad_params, pcmf32_vad.data(), pcmf32_vad.size());
+
+    int n_segments = whisper_vad_segments_n_segments(segments);
+    whisper_vad_free_segments(segments);
+
+    return n_segments > 0;
+}
+
 static bool whisper_params_parse(int argc, char ** argv, whisper_params & params) {
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -385,29 +400,31 @@ int main(int argc, char ** argv) {
         if (vad_ctx != nullptr) {
             std::vector<float> pcmf32_vad = pcmf32;
 
-            if (rnnoise_st != nullptr) {
-                denoise_audio(rnnoise_st, pcmf32_vad);
-            }
+            whisper_vad_params denoise_path = whisper_vad_default_params();
+            denoise_path.threshold = 0.65f;
+            denoise_path.min_speech_duration_ms = 200;
 
-            struct whisper_vad_params vad_params = whisper_vad_default_params();
-            vad_params.threshold = params.silero_vad_threshold;
-
-            struct whisper_vad_segments * segments = whisper_vad_segments_from_samples(
-                vad_ctx, vad_params, pcmf32_vad.data(), pcmf32_vad.size());
-
-            int n_segments = whisper_vad_segments_n_segments(segments);
-            whisper_vad_free_segments(segments);
-
-            if (n_segments == 0) {
-                skip += 1;
-                if (params.subprocess_mode && skip > SKIP_CLEAR) {
-                    if (previous_text) {
-                        printf("<text>:\n");
-                        fflush(stdout);
-                    }
-                    previous_text = false;
+            if (!found_speech_segments(params, denoise_path, vad_ctx, pcmf32_vad)) { // first check with no denoise
+                if (rnnoise_st != nullptr) {
+                    denoise_audio(rnnoise_st, pcmf32_vad);
                 }
-                continue;
+
+                whisper_vad_params no_denoise_path = whisper_vad_default_params();
+                no_denoise_path.threshold = 0.6f;
+                no_denoise_path.speech_pad_ms = 50;
+                no_denoise_path.min_speech_duration_ms = 150;
+
+                if (!found_speech_segments(params, no_denoise_path, vad_ctx, pcmf32_vad)) {
+                    skip += 1;
+                    if (params.subprocess_mode && skip > SKIP_CLEAR) {
+                        if (previous_text) {
+                            printf("<text>:\n");
+                            fflush(stdout);
+                        }
+                        previous_text = false;
+                    }
+                    continue;
+                }
             }
         }
 
