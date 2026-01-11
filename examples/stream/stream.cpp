@@ -400,21 +400,21 @@ int main(int argc, char ** argv) {
         if (vad_ctx != nullptr) {
             std::vector<float> pcmf32_vad = pcmf32;
 
-            whisper_vad_params denoise_path = whisper_vad_default_params();
-            denoise_path.threshold = 0.65f;
-            denoise_path.min_speech_duration_ms = 200;
+            whisper_vad_params no_denoise_path = whisper_vad_default_params();
+            no_denoise_path.threshold = 0.35f;
+            no_denoise_path.speech_pad_ms = 50;
+            no_denoise_path.min_speech_duration_ms = 150;
 
-            if (!found_speech_segments(params, denoise_path, vad_ctx, pcmf32_vad)) { // first check with no denoise
+            if (!found_speech_segments(params, no_denoise_path, vad_ctx, pcmf32_vad)) { // first check with no denoise
                 if (rnnoise_st != nullptr) {
                     denoise_audio(rnnoise_st, pcmf32_vad);
                 }
 
-                whisper_vad_params no_denoise_path = whisper_vad_default_params();
-                no_denoise_path.threshold = 0.6f;
-                no_denoise_path.speech_pad_ms = 50;
-                no_denoise_path.min_speech_duration_ms = 150;
+                whisper_vad_params denoise_path = whisper_vad_default_params();
+                denoise_path.threshold = 0.65f;
+                denoise_path.min_speech_duration_ms = 200;
 
-                if (!found_speech_segments(params, no_denoise_path, vad_ctx, pcmf32_vad)) {
+                if (!found_speech_segments(params, denoise_path, vad_ctx, pcmf32_vad)) {
                     skip += 1;
                     if (params.subprocess_mode && skip > SKIP_CLEAR) {
                         if (previous_text) {
