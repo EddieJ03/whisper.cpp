@@ -5953,7 +5953,7 @@ struct whisper_full_params whisper_full_default_params(enum whisper_sampling_str
         /*.temperature_inc   =*/  0.2f,
         /*.entropy_thold     =*/  2.4f,
         /*.logprob_thold     =*/ -1.0f,
-        /*.no_speech_thold   =*/  0.6f,
+        /*.no_speech_thold   =*/  0.65f,
 
         /*.greedy            =*/ {
             /*.best_of   =*/ -1,

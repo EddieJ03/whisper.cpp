@@ -7,7 +7,6 @@
 #include "common-whisper.h"
 #include "whisper.h"
 
-#include <chrono>
 #include <cstdio>
 #include <fstream>
 #include <string>
@@ -401,7 +400,7 @@ int main(int argc, char ** argv) {
             std::vector<float> pcmf32_vad = pcmf32;
 
             whisper_vad_params no_denoise_path = whisper_vad_default_params();
-            no_denoise_path.threshold = 0.35f;
+            no_denoise_path.threshold = 0.4f;
             no_denoise_path.speech_pad_ms = 50;
             no_denoise_path.min_speech_duration_ms = 150;
 
@@ -416,6 +415,9 @@ int main(int argc, char ** argv) {
 
                 if (!found_speech_segments(params, denoise_path, vad_ctx, pcmf32_vad)) {
                     skip += 1;
+                    if (!params.no_context) {
+                        prompt_tokens.clear();
+                    }
                     if (params.subprocess_mode && skip > SKIP_CLEAR) {
                         if (previous_text) {
                             printf("<text>:\n");
@@ -462,11 +464,11 @@ int main(int argc, char ** argv) {
             // print result;
             {
                 if (!use_vad) {
-                    if (!params.subprocess_mode) {
-                        printf("\33[2K\r");
+                    // if (!params.subprocess_mode) {
+                    //     printf("\33[2K\r");
 
-                        printf("\33[2K\r");
-                    }
+                    //     printf("\33[2K\r");
+                    // }
                 } else {
                     const int64_t t1 = (t_last - t_start).count()/1000000;
                     const int64_t t0 = std::max(0.0, t1 - pcmf32.size()*1000.0/WHISPER_SAMPLE_RATE);
@@ -522,7 +524,7 @@ int main(int argc, char ** argv) {
                     if (params.subprocess_mode)
                         printf("<text>:%s\n", output.c_str());
                     else
-                        printf("%s", output.c_str());
+                        printf("%s\n", output.c_str());
                     fflush(stdout);
                 }
             }
@@ -531,7 +533,7 @@ int main(int argc, char ** argv) {
 
             if (!use_vad && (n_iter % n_new_line) == 0) {
                 if (params.subprocess_mode)
-                    printf("C:\n");
+                    printf("<next>:\n");
                 else
                     printf("\n");
 
