@@ -6849,10 +6849,10 @@ int whisper_full_with_state(
     }
 
     // a set of temperatures to use
-    // [ t0, t0 + delta, t0 + 2*delta, ..., < 1.0f + 1e-6f ]
+    // [ t0, t0 + delta ]
     std::vector<float> temperatures;
     if (params.temperature_inc > 0.0f) {
-        for (float t = params.temperature; t < 1.0f + 1e-6f; t += params.temperature_inc) {
+        for (float t = params.temperature; t < 3.0f + 1e-6f; t += params.temperature_inc) {
             temperatures.push_back(t);
         }
     } else {

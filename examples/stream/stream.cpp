@@ -13,6 +13,10 @@
 #include <thread>
 #include <vector>
 #include <cmath>
+#include <set>
+#include <queue>
+#include <mutex>
+#include <condition_variable>
 
 // command-line parameters
 struct whisper_params {
@@ -168,6 +172,12 @@ void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params & para
 
 static void cb_log_disable(enum ggml_log_level, const char *, void *) { }
 
+std::queue<std::vector<float>> audio_queue;
+std::mutex queue_mutex;
+std::condition_variable queue_cv;
+std::atomic<bool> is_running(false);
+std::atomic<bool> run_audio_collection_thread(true);
+
 int main(int argc, char ** argv) {
     ggml_backend_load_all();
 
@@ -202,8 +212,6 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "%s: audio.init() failed!\n", __func__);
         return 1;
     }
-
-    audio.resume();
 
     // whisper init
     if (params.language != "auto" && whisper_lang_id(params.language.c_str()) == -1){
@@ -289,8 +297,6 @@ int main(int argc, char ** argv) {
 
     int n_iter = 0;
 
-    bool is_running = true;
-
     std::ofstream fout;
     if (params.fname_out.length() > 0) {
         fout.open(params.fname_out);
@@ -311,13 +317,101 @@ int main(int argc, char ** argv) {
 
         wavWriter.open(filename, WHISPER_SAMPLE_RATE, 16, 1);
     }
+
+    audio.resume();
+
+    std::thread audio_collection_thread([&]() { // assumption is this thread would never crash
+        if(use_vad)
+            return;
+        int audio_collect_iter = 0;
+        std::vector<float> pcmf32_new_local;
+        while (run_audio_collection_thread) {
+            while (is_running) {
+                audio.get(params.step_ms, pcmf32_new_local);
+
+                if ((int) pcmf32_new_local.size() > 2*n_samples_step) {
+                    fprintf(stderr, "\n\n%s: WARNING: cannot process audio fast enough, dropping audio ...\n\n", __func__);
+                    audio.clear();
+                    continue;
+                }
+
+                if ((int) pcmf32_new_local.size() >= n_samples_step) {
+                    audio.clear();
+                    break;
+                }
+
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            
+            if (is_running) {
+                auto pcmf32_new_local_copy = pcmf32_new_local;
+
+                const int n_samples_new = pcmf32_new_local_copy.size();
+                const int n_samples_take = std::min((int) pcmf32_old.size(), std::max(0, n_samples_keep + n_samples_len - n_samples_new));
+
+                pcmf32_new_local.resize(n_samples_new + n_samples_take);
+
+                for (int i = 0; i < n_samples_take; i++) {
+                    pcmf32_new_local[i] = pcmf32_old[pcmf32_old.size() - n_samples_take + i];
+                }
+
+                memcpy(pcmf32_new_local.data() + n_samples_take, pcmf32_new_local_copy.data(), n_samples_new*sizeof(float));
+
+                if (!use_vad && vad_ctx != nullptr) {
+                    std::vector<float> pcmf32_vad = pcmf32_new_local;
+
+                    whisper_vad_params no_denoise_path = whisper_vad_default_params();
+                    no_denoise_path.threshold = 0.4f;
+                    no_denoise_path.speech_pad_ms = 50;
+                    no_denoise_path.min_speech_duration_ms = 150;
+
+                    if (!found_speech_segments(params, no_denoise_path, vad_ctx, pcmf32_vad)) { // first check with no denoise
+                        if (rnnoise_st != nullptr) {
+                            denoise_audio(rnnoise_st, pcmf32_vad);
+                        }
+
+                        whisper_vad_params denoise_path = whisper_vad_default_params();
+                        denoise_path.threshold = 0.65f;
+                        denoise_path.min_speech_duration_ms = 200;
+
+                        if (!found_speech_segments(params, denoise_path, vad_ctx, pcmf32_vad)) {
+                            // if (!params.no_context) {
+                            //     prompt_tokens.clear();
+                            // }
+                            if (params.subprocess_mode) {
+                                // if (previous_text) {
+                                printf("<next>:\n");
+                                fflush(stdout);
+                                // }
+                                // previous_text = false;
+                            }
+                            continue;
+                        }
+                    }
+                }
+
+                ++audio_collect_iter;
+                if (audio_collect_iter % n_new_line == 0) {
+                    pcmf32_old = std::vector<float>(pcmf32_new_local.end() - n_samples_keep, pcmf32_new_local.end());
+                } else {
+                    pcmf32_old = pcmf32_new_local;
+                }
+                std::lock_guard<std::mutex> lock(queue_mutex);
+                audio_queue.push(pcmf32_new_local);
+                if(audio_queue.size() == 1) // just added, notify thread
+                    queue_cv.notify_one();
+            }
+        }
+    });
+
     printf("<Ready to transcribe %s to %s>\n", params.language.c_str(), "en");
+    is_running = true;
     fflush(stdout);
 
     auto t_last  = std::chrono::high_resolution_clock::now();
     const auto t_start = t_last;
     uint16_t skip = 0;
-    bool previous_text = false;
+    // bool previous_text = false;
     const uint8_t SKIP_CLEAR = 2;
 
     // main audio loop
@@ -326,53 +420,35 @@ int main(int argc, char ** argv) {
             wavWriter.write(pcmf32_new.data(), pcmf32_new.size());
         }
         // handle Ctrl + C
-        is_running = sdl_poll_events();
-
-        if (!is_running) {
+        if (!sdl_poll_events()) {
+            is_running = false;
             break;
         }
 
         // process new audio
 
         if (!use_vad) {
-            while (true) {
+            while(is_running) {
+                std::unique_lock<std::mutex> lock(queue_mutex);
+                queue_cv.wait_for(lock, std::chrono::milliseconds(10), [&]{ return !audio_queue.empty(); });
+
                 // handle Ctrl + C
-                is_running = sdl_poll_events();
-                if (!is_running) {
+                if (!sdl_poll_events()) {
+                    is_running = false;
                     break;
                 }
-                audio.get(params.step_ms, pcmf32_new);
-
-                if ((int) pcmf32_new.size() > 2*n_samples_step) {
-                    fprintf(stderr, "\n\n%s: WARNING: cannot process audio fast enough, dropping audio ...\n\n", __func__);
-                    audio.clear();
+                
+                if (audio_queue.empty()) {
                     continue;
                 }
-
-                if ((int) pcmf32_new.size() >= n_samples_step) {
-                    audio.clear();
-                    break;
-                }
-
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                
+                pcmf32 = audio_queue.front();
+                audio_queue.pop();
+                break; // got new audio!
             }
 
-            const int n_samples_new = pcmf32_new.size();
-
-            // take up to params.length_ms audio from previous iteration
-            const int n_samples_take = std::min((int) pcmf32_old.size(), std::max(0, n_samples_keep + n_samples_len - n_samples_new));
-
-            //printf("processing: take = %d, new = %d, old = %d\n", n_samples_take, n_samples_new, (int) pcmf32_old.size());
-
-            pcmf32.resize(n_samples_new + n_samples_take);
-
-            for (int i = 0; i < n_samples_take; i++) {
-                pcmf32[i] = pcmf32_old[pcmf32_old.size() - n_samples_take + i];
-            }
-
-            memcpy(pcmf32.data() + n_samples_take, pcmf32_new.data(), n_samples_new*sizeof(float));
-
-            pcmf32_old = pcmf32;
+            if(!is_running)
+                break;
         } else {
             const auto t_now  = std::chrono::high_resolution_clock::now();
             const auto t_diff = std::chrono::duration_cast<std::chrono::milliseconds>(t_now - t_last).count();
@@ -394,40 +470,6 @@ int main(int argc, char ** argv) {
             }
 
             t_last = t_now;
-        }
-
-        if (vad_ctx != nullptr) {
-            std::vector<float> pcmf32_vad = pcmf32;
-
-            whisper_vad_params no_denoise_path = whisper_vad_default_params();
-            no_denoise_path.threshold = 0.4f;
-            no_denoise_path.speech_pad_ms = 50;
-            no_denoise_path.min_speech_duration_ms = 150;
-
-            if (!found_speech_segments(params, no_denoise_path, vad_ctx, pcmf32_vad)) { // first check with no denoise
-                if (rnnoise_st != nullptr) {
-                    denoise_audio(rnnoise_st, pcmf32_vad);
-                }
-
-                whisper_vad_params denoise_path = whisper_vad_default_params();
-                denoise_path.threshold = 0.65f;
-                denoise_path.min_speech_duration_ms = 200;
-
-                if (!found_speech_segments(params, denoise_path, vad_ctx, pcmf32_vad)) {
-                    skip += 1;
-                    if (!params.no_context) {
-                        prompt_tokens.clear();
-                    }
-                    if (params.subprocess_mode && skip > SKIP_CLEAR) {
-                        if (previous_text) {
-                            printf("<text>:\n");
-                            fflush(stdout);
-                        }
-                        previous_text = false;
-                    }
-                    continue;
-                }
-            }
         }
 
         // run the inference
@@ -519,8 +561,7 @@ int main(int argc, char ** argv) {
                     printf("\n");
                     printf("### Transcription %d END\n", n_iter);
                 } else {
-                    skip = 0;
-                    previous_text = true;
+                    // previous_text = true;
                     if (params.subprocess_mode)
                         printf("<text>:%s\n", output.c_str());
                     else
@@ -538,25 +579,36 @@ int main(int argc, char ** argv) {
                     printf("\n");
 
                 // keep part of the audio for next iteration to try to mitigate word boundary issues
-                pcmf32_old = std::vector<float>(pcmf32.end() - n_samples_keep, pcmf32.end());
 
                 // Add tokens of the last full length segment as the prompt
                 if (!params.no_context) {
                     prompt_tokens.clear();
 
+                    std::set<whisper_token> token_id_set;
+                    uint16_t num_tokens = 0;
+
                     const int n_segments = whisper_full_n_segments(ctx);
                     for (int i = 0; i < n_segments; ++i) {
                         const int token_count = whisper_full_n_tokens(ctx, i);
                         for (int j = 0; j < token_count; ++j) {
-                            prompt_tokens.push_back(whisper_full_get_token_id(ctx, i, j));
+                            whisper_token token_id = whisper_full_get_token_id(ctx, i, j);
+                            num_tokens += 1;
+                            prompt_tokens.push_back(token_id);
+                            token_id_set.insert(token_id);
                         }
                     }
+
+                    if ((token_id_set.size()*1.0) / (1.0*num_tokens) >= 0.4)
+                        prompt_tokens.clear();
                 }
             }
             fflush(stdout);
         }
     }
-
+    run_audio_collection_thread = false;
+    if (audio_collection_thread.joinable()) {
+        audio_collection_thread.join();
+    }
     audio.pause();
 
     whisper_print_timings(ctx);
